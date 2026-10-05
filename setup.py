@@ -23,8 +23,10 @@ setup(
         'dask[complete]>=2',
         'distributed>=2',
         'emcee',
+        'joblib',
         'matplotlib',
         'numpy>=1.20',
+        'pandas',
         'pycalphad>=0.11.0',
         'pydantic>2.0',
         'pyyaml',
@@ -33,6 +35,7 @@ setup(
         'scipy',
         'symengine>=0.9',
         'tinydb>=4',
+        'torch',
     ],
     extras_require={
         'dev': [

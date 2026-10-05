@@ -314,4 +314,4 @@ class EquilibriumPropertyResidual(ResidualFunction):
         return likelihood
 
 
-residual_function_registry.register(EquilibriumPropertyResidual)
+#residual_function_registry.register(EquilibriumPropertyResidual)

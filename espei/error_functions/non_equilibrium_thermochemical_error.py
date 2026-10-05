@@ -414,9 +414,14 @@ def compute_fixed_configuration_property_differences(dbf, calc_data: FixedConfig
         new_sitefracs = np.array([sf for _, sf in sorted(dof.items(), key=lambda y: (y[0].phase_name, y[0].sublattice_index, y[0].species.name))])
         new_statevars = np.array(compset.dof[:len(compset.phase_record.state_variables)])  # no updates expected
         compset.update(new_sitefracs, 1.0, new_statevars)
+        if output == 'SM_MIX':
+            ideal_entropy = -8.314 * np.sum(new_sitefracs * np.log(new_sitefracs + 1e-12))
+        else:
+            ideal_entropy = 0
+        # ideal_entropy = 0
         iso_phase = IsolatedPhase(compset, wks=wks)
         iso_phase.solver = NoSolveSolver()
-        results = wks.get(iso_phase(output))
+        results = wks.get(iso_phase(output))-ideal_entropy
         sample_differences = results - sample_values[index]
         differences.append(sample_differences)
     return differences
@@ -453,6 +458,38 @@ def calculate_non_equilibrium_thermochemical_probability(thermochemical_data: Li
         _log.debug("%s(%s) - probability sum: %0.2f, data: %s, differences: %s, probabilities: %s, references: %s", data['prop'], phase_name, prob_sum, sample_values, differences, probabilities, data['calculate_dict']['references'])
         prob_error += prob_sum
     return prob_error
+
+def calculate_seperate_error(thermochemical_data: List[FixedConfigurationCalculationData], dbf, parameters=None):
+    """
+    Calculate the weighted single phase error in the Database
+
+    Parameters
+    ----------
+    thermochemical_data : list
+        List of thermochemical data dicts
+    parameters : np.ndarray
+        Array of parameters to calculate the error with.
+
+    Returns
+    -------
+    float
+        A single float of the residual sum of square errors
+
+    """
+    if parameters is None:
+        parameters = {}
+
+    grouped_error = {}
+    for data in thermochemical_data:
+        ref_value = data['calculate_dict']['values']
+        ref_T = data['calculate_dict']['T']
+        phase_name = data['phase_name']
+        prop = data['output']
+        differences = compute_fixed_configuration_property_differences(dbf, data, parameters)
+        differences = [np.average(np.array(differences)+np.array(ref_value)),np.array(ref_value).mean()]
+        key = phase_name + '_' + prop
+        grouped_error.setdefault(key,[]).append(differences)
+    return grouped_error
 
 
 class FixedConfigurationPropertyResidual(ResidualFunction):
@@ -501,6 +538,11 @@ class FixedConfigurationPropertyResidual(ResidualFunction):
     def get_likelihood(self, parameters) -> float:
         parameters = {param_name: param for param_name, param in zip(self._symbols_to_fit, parameters.tolist())}
         likelihood = calculate_non_equilibrium_thermochemical_probability(self.thermochemical_data, self.dbf, parameters)
+        return likelihood
+    
+    def get_grouped_error(self, parameters):
+        parameters = {param_name: param for param_name, param in zip(self._symbols_to_fit, parameters.tolist())}
+        likelihood = calculate_seperate_error(self.thermochemical_data, self.dbf, parameters)
         return likelihood
 
 

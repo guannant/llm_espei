@@ -285,16 +285,176 @@ def _get_interaction_predicted_values(dbf, comps, phase_name, configuration, out
     mod = Model(dbf, comps, phase_name)
     mod.models['idmix'] = 0  # TODO: better reference state handling
     endpoints = endmembers_from_interaction(configuration)
+
     first_endpoint = _translate_endmember_to_array(endpoints[0], mod.ast.atoms(v.SiteFraction))
+
     second_endpoint = _translate_endmember_to_array(endpoints[1], mod.ast.atoms(v.SiteFraction))
     grid = np.linspace(0, 1, num=100)
     point_matrix = grid[None].T * second_endpoint + (1 - grid)[None].T * first_endpoint
+
     # TODO: Real temperature support
     predicted_values = calculate(
         dbf, comps, [phase_name], output=output,
         T=298.15, P=101325, points=point_matrix, model=mod)[output].values.flatten()
     return grid, predicted_values
 
+def _get_interaction_predicted_values_T(dbf, comps, phase_name, configuration, output, T=298.15):
+    mod = Model(dbf, comps, phase_name)
+    mod.models['idmix'] = 0  # TODO: better reference state handling
+    endpoints = endmembers_from_interaction(configuration)
+
+    first_endpoint = _translate_endmember_to_array(endpoints[0], mod.ast.atoms(v.SiteFraction))
+
+    second_endpoint = _translate_endmember_to_array(endpoints[1], mod.ast.atoms(v.SiteFraction))
+    grid = np.linspace(0, 1, num=100)
+    point_matrix = grid[None].T * second_endpoint + (1 - grid)[None].T * first_endpoint
+
+    # TODO: Real temperature support
+    predicted_values = calculate(
+        dbf, comps, [phase_name], output=output,
+        T=T, P=101325, points=point_matrix, model=mod)[output].values.flatten()
+    return grid, predicted_values
+
+
+def plot_all_interaction(dbf, comps, phase_name, configuration, output, datasets=None, symmetry=None, ax=None, plot_kwargs=None, dataplot_kwargs=None) -> plt.Axes:
+    """
+    Return one set of plotted Axes with data compared to calculated parameters
+
+    Parameters
+    ----------
+    dbf : Database
+        pycalphad thermodynamic database containing the relevant parameters.
+    comps : Sequence[str]
+        Names of components to consider in the calculation.
+    phase_name : str
+        Name of the considered phase phase
+    configuration : Tuple[Tuple[str]]
+        ESPEI-style configuration
+    output : str
+        Model property to plot on the y-axis e.g. ``'HM_MIX'``, or ``'SM_MIX'``.
+        Must be a ``'_MIX'`` property.
+    datasets : tinydb.TinyDB
+    symmetry : list
+        List of lists containing indices of symmetric sublattices e.g. [[0, 1], [2, 3]]
+    ax : plt.Axes
+        Default axes used if not specified.
+    plot_kwargs : Optional[Dict[str, Any]]
+        Keyword arguments to ``ax.plot`` for the predicted data.
+    dataplot_kwargs : Optional[Dict[str, Any]]
+        Keyword arguments to ``ax.plot`` the observed data.
+
+    Returns
+    -------
+    plt.Axes
+
+    """
+    if not output.endswith('_MIX'):
+        raise ValueError("`plot_interaction` only supports HM_MIX, SM_MIX, or CPM_MIX outputs.")
+    if not plot_kwargs:
+        plot_kwargs = {}
+    if not dataplot_kwargs:
+        dataplot_kwargs = {}
+
+    # Plot predicted values from the database
+    
+
+    # Plot the observed values from the datasets
+    # TODO: model exclusions handling
+    # TODO: better reference state handling
+    mod_srf = Model(dbf, comps, phase_name, parameters={'GHSER'+c.upper(): 0 for c in comps})
+    mod_srf.models = {'ref': mod_srf.models['ref']}
+
+    # _MIX assumption
+    prop = output.split('_MIX')[0]
+    desired_props = (f"{prop}_MIX", f"{prop}_FORM")
+    if datasets is not None:
+        solver_qry = (tinydb.where('solver').test(symmetry_filter, configuration, recursive_tuplify(symmetry) if symmetry else symmetry))
+        desired_data = get_prop_data(comps, phase_name, desired_props, datasets, additional_query=solver_qry)
+        desired_data = filter_configurations(desired_data, configuration, symmetry)
+        desired_data = filter_temperatures(desired_data)
+    else:
+        desired_data = []
+
+    species = unpack_species(dbf, comps)
+    # phase constituents are Species objects, so we need to be doing intersections with those
+    phase_constituents = dbf.phases[phase_name].constituents
+    # phase constituents must be filtered to only active
+    constituents = [[sp.name for sp in sorted(subl_constituents.intersection(species))] for subl_constituents in phase_constituents]
+    subl_dof = list(map(len, constituents))
+    calculate_dict = get_prop_samples(desired_data, constituents)
+    sample_condition_dicts = get_sample_condition_dicts(calculate_dict, canonicalize(constituents, symmetry), phase_name)
+    interacting_subls = [c for c in recursive_tuplify(configuration) if isinstance(c, tuple)]
+    if (len(set(interacting_subls)) == 1) and (len(interacting_subls[0]) == 2):
+        # This configuration describes all sublattices with the same two elements interacting
+        # In general this is a high-dimensional space; just plot the diagonal to see the disordered mixing
+        endpoints = endmembers_from_interaction(configuration)
+        endpoints = [endpoints[0], endpoints[-1]]
+        disordered_config = True
+    else:
+        disordered_config = False
+    bib_reference_keys = sorted({entry.get('reference', '') for entry in desired_data})
+    symbol_map = bib_marker_map(bib_reference_keys)
+    for data in desired_data:
+        Temperature  = data['conditions'].get('T')
+        fig, ax = plt.subplots()
+        grid, predicted_values = _get_interaction_predicted_values_T(dbf, comps, phase_name, configuration, output,Temperature)
+        plot_kwargs.setdefault('label', 'This work')
+        plot_kwargs.setdefault('color', 'k')
+        ax.plot(grid, predicted_values, **plot_kwargs)
+        indep_var_data = None
+        response_data = np.zeros_like(data['values'], dtype=np.float64)
+        if disordered_config:
+            # Take the second element of the first interacting sublattice as the coordinate
+            # Because it's disordered all sublattices should be equivalent
+            # TODO: Fix this to filter because we need to guarantee the plot points are disordered
+            occ = data['solver']['sublattice_occupancies']
+            subl_idx = np.nonzero([isinstance(c, (list, tuple)) for c in occ[0]])[0]
+            if len(subl_idx) > 1:
+                subl_idx = int(subl_idx[0])
+            else:
+                subl_idx = int(subl_idx)
+            indep_var_data = [c[subl_idx][1] for c in occ]
+        else:
+            interactions = np.array([cond_dict[Symbol('YS')] for cond_dict in sample_condition_dicts])
+            indep_var_data = 1 - (interactions+1)/2
+        if data['output'].endswith('_FORM'):
+            # All the _FORM data we have still has the lattice stability contribution
+            # Need to zero it out to shift formation data to mixing
+            temps = data['conditions'].get('T')
+            pressures = data['conditions'].get('P', 101325)
+            points = build_sitefractions(phase_name, data['solver']['sublattice_configurations'],
+                                            data['solver']['sublattice_occupancies'])
+            for point_idx in range(len(points)):
+                missing_variables = mod_srf.ast.atoms(v.SiteFraction) - set(points[point_idx].keys())
+                # Set unoccupied values to zero
+                points[point_idx].update({key: 0 for key in missing_variables})
+                # Change entry to a sorted array of site fractions
+                points[point_idx] = list(OrderedDict(sorted(points[point_idx].items(), key=str)).values())
+            points = np.array(points, dtype=np.float64)
+            # TODO: Real temperature support
+            stability = calculate(dbf, comps, [phase_name], output=data['output'][:-5],
+                                    T=temps, P=pressures, points=points,
+                                    model=mod_srf)
+            response_data -= stability[data['output'][:-5]].values.squeeze()
+
+        response_data += np.array(data['values'], dtype=np.float64)
+        response_data = response_data.flatten()
+        ref = data.get('reference', '')
+        dataplot_kwargs.setdefault('markersize', 8)
+        dataplot_kwargs.setdefault('linestyle', 'none')
+        dataplot_kwargs.setdefault('clip_on', False)
+        # Cannot use setdefault because it won't overwrite previous iterations
+        dataplot_kwargs['label'] = symbol_map[ref]['formatted']
+        dataplot_kwargs['marker'] = symbol_map[ref]['markers']['marker']
+        dataplot_kwargs['fillstyle'] = symbol_map[ref]['markers']['fillstyle']
+        ax.plot(indep_var_data, response_data, **dataplot_kwargs)
+        ax.set_xlim((0, 1))
+        ax.set_xlabel(str(':'.join(endpoints[0])) + ' to ' + str(':'.join(endpoints[1])))
+        ax.set_ylabel(plot_mapping.get(output, output))
+        ax.set_title(f'Computing for {Temperature} K')
+        leg = ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))  # legend outside
+        leg.get_frame().set_edgecolor('black')
+    return ax
 
 def plot_interaction(dbf, comps, phase_name, configuration, output, datasets=None, symmetry=None, ax=None, plot_kwargs=None, dataplot_kwargs=None) -> plt.Axes:
     """
@@ -360,7 +520,7 @@ def plot_interaction(dbf, comps, phase_name, configuration, output, datasets=Non
         desired_data = filter_temperatures(desired_data)
     else:
         desired_data = []
-
+    
     species = unpack_species(dbf, comps)
     # phase constituents are Species objects, so we need to be doing intersections with those
     phase_constituents = dbf.phases[phase_name].constituents
@@ -434,7 +594,6 @@ def plot_interaction(dbf, comps, phase_name, configuration, output, datasets=Non
     leg = ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))  # legend outside
     leg.get_frame().set_edgecolor('black')
     return ax
-
 
 def plot_endmember(dbf, comps, phase_name, configuration, output, datasets=None, symmetry=None, x='T', ax=None, plot_kwargs=None, dataplot_kwargs=None) -> plt.Axes:
     """

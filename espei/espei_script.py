@@ -29,7 +29,6 @@ from espei.validation import schema
 from espei import generate_parameters
 from espei.utils import ImmediateClient, database_symbols_to_fit, import_qualified_object, unpack_piecewise
 from espei.datasets import DatasetError, load_datasets, recursive_glob, apply_tags
-from espei.optimizers.opt_mcmc_nest import UNOptimizer
 from espei.optimizers.opt_mcmc import EmceeOptimizer
 
 _log = logging.getLogger(__name__)
@@ -219,30 +218,15 @@ def run_espei(run_settings):
         syms = mcmc_settings.get('symbols')
         approximate_equilibrium = mcmc_settings.get('approximate_equilibrium')
 
-        if os.path.exists("sample_count.csv"):
-            sample_counts = np.loadtxt("sample_count.csv", delimiter=",").reshape((-1,1))
-            print("using existing sample counts")
-        else:
-            sample_counts = np.array([[0]]*22)
+        
 
         # set up and run the EmceeOptimizer
-        optimizer = UNOptimizer(dbf, phase_models=phase_models,scheduler=None)
-        optimizer.save_interval = save_interval
         all_symbols = syms if syms is not None else database_symbols_to_fit(dbf)
-        W_r, ref_pos, para_scaler = optimizer.fit(all_symbols, datasets, prior=prior, iterations=LHS_iterations,
-                      decay_f=5e-4,
-                      sample_counts=sample_counts,
-                      deterministic=deterministic,
-                      mcmc_data_weights=data_weights,
-                      )
-        
         active_id = np.array([x for x in range(22)])
-        print("active ID:",active_id)
-        if os.path.exists("sample_count.csv"):
-            print("used best guess from previous TDB")
-            dbf = Database('/Users/guannantang/Dropbox/Calphad/LLM_run_file/cu-mg-example/Cu-Mg-generated.tdb')
-            symbols_to_fit = database_symbols_to_fit(dbf)
-            best_guess = np.array([unpack_piecewise(dbf.symbols[s]) for s in symbols_to_fit])
+        
+        # print("active ID:",active_id)
+        symbols_to_fit = database_symbols_to_fit(dbf)
+        best_guess = np.array([unpack_piecewise(dbf.symbols[s]) for s in symbols_to_fit])
 
          # scheduler setup
         if mcmc_settings['scheduler'] is not None:
@@ -274,7 +258,8 @@ def run_espei(run_settings):
 
         optimizer = EmceeOptimizer(dbf, verbosity=log_verbosity,logger_filename=log_filename,phase_models=phase_models, scheduler=client)
         optimizer.save_interval = save_interval
-        _, sample_counts = optimizer.fit(all_symbols, datasets, W_r, ref_pos,best_guess,sample_counts=sample_counts,norm_scaler = para_scaler, surrogate = None,active_id = active_id,
+        W_r, ref_pos, para_scaler= None,None,None
+        _ = optimizer.fit(all_symbols, datasets, W_r, ref_pos,best_guess,norm_scaler = para_scaler, surrogate = None,active_id = active_id,
                       prior=prior, iterations=iterations,
                       chains_per_parameter=chains_per_parameter,
                       chain_std_deviation=chain_std_deviation,
@@ -283,8 +268,8 @@ def run_espei(run_settings):
                       mcmc_data_weights=data_weights,
                       approximate_equilibrium=approximate_equilibrium,
                       )
-        np.savetxt("sample_count.csv", sample_counts, delimiter=",")
-        print("sample counts:",sample_counts)
+        #np.savetxt("sample_count.csv", sample_counts, delimiter=",")
+        # print("sample counts:",sample_counts)
         optimizer.dbf.to_file(output_settings['output_db'], if_exists='overwrite')
         # close the scheduler, if possible
         # if hasattr(client, 'close'):
