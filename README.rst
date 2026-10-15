@@ -1,165 +1,176 @@
-=====
-ESPEI
-=====
+=========
+llm_espei
+=========
 
-**Documentation:** `espei.org <https://espei.org>`_.
+**A fork of ESPEI that serves as the Bayesian CALPHAD engine for Auto-DDM.**
 
-ESPEI, or Extensible Self-optimizing Phase Equilibria Infrastructure, is a tool for creating CALPHAD databases and evaluating the uncertanity of CALPHAD models.
-The purpose of ESPEI is to be both a user tool for fitting state-of-the-art CALPHAD-type models and to be a research platform for developing methods for fitting and uncertainty quantification.
-ESPEI uses `pycalphad`_ for the thermodynamic backend and supports fitting adjustable parameters for any pycalphad model.
+Auto-DDM (Autonomous Data-Driven Modeling) is an LLM-agentic, multi-objective
+workflow for weighting heterogeneous datasets in data-driven modeling.
+Its CALPHAD example calls this fork once per candidate weight vector to
+calibrate a Cu–Mg thermodynamic database and return 22 per-dataset errors.
 
-ESPEI is developed in the open on `GitHub <https://github.com/PhasesResearchLab/ESPEI>`_.
-The project is led by Brandon Bocklund, who is currently a postdoctoral researcher at Lawrence Livermore National Laboratory.
-Brandon developed ESPEI while completing his Ph.D. under Zi-Kui Liu at The Pennsylvania State University.
-See the project's `History`_ for more details.
+- Paper: G. Tang and N. Paulson, *An LLM-Agentic Workflow for Data-Driven
+  Modeling: From Image Reconstruction to Thermodynamic Modeling*, Research
+  Square preprint (2026). doi:`10.21203/rs.3.rs-8574739/v2 <https://doi.org/10.21203/rs.3.rs-8574739/v2>`_
+- Workflow code: `guannant/Auto_DataDrivenModeling <https://github.com/guannant/Auto_DataDrivenModeling>`_
+- Upstream project: `PhasesResearchLab/ESPEI <https://github.com/PhasesResearchLab/ESPEI>`_ (`espei.org <https://espei.org>`_)
 
-What does ESPEI do?
--------------------
+This fork is based on ESPEI 0.9.0. It is not a drop-in replacement for ESPEI:
+the MCMC path is specialized for the Auto-DDM Cu–Mg case and is not meant for
+general CALPHAD assessments.
 
-Parameter generation
-~~~~~~~~~~~~~~~~~~~~
 
-ESPEI can be used to generate model parameters for CALPHAD models of the Gibbs energy that follow the temperature-dependent power series expansion of the Gibbs energy within the compound energy formalism (CEF) for endmembers and for binary and ternary Redlich-Kister interaction parameters with Muggianu extrapolation.
-This parameter generation step augments the CALPHAD modeler by providing tools for data-driven model selection, rather than relying on a modeler's intuition alone.
-Model generation is based on a linear regression of enthalpy, entropy, and heat capacity data, using the corrected Akiake Information Criterion (AICc) to prevent overfitting.
+How this fork differs from ESPEI
+================================
 
-Optimization and uncertainty quantification
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+- **Surrogate likelihood.** During MCMC, ``EmceeOptimizer.predict`` no longer
+  evaluates PyCalphad. It loads a residual MLP surrogate
+  (``final_model_full_data.pt``), its input/output scalers (``scalerX.pkl``,
+  ``scalerY.pkl``) and a dataset-weight file (``weights.json``) from the folder
+  named by the ``AUTODDM_SURROGATE_DIR`` environment variable. The surrogate
+  maps the 22 model parameters to 22 per-dataset errors, and the log-likelihood
+  is ``sum(norm.logpdf(error, loc=0, scale=weight))``. Dataset weights
+  therefore act as per-dataset standard deviations. A full ESPEI run that
+  takes hours on an HPC node becomes a run of tens of seconds on a laptop.
+- **Per-dataset error evaluation.** ``espei.optimizers.opt_generate_samples.DataGenerator``
+  evaluates a database against the loaded datasets with PyCalphad and returns
+  one error per dataset (``eval_samples_sep``): the mean predicted-minus-reference
+  value for each thermochemical dataset, and the mean driving force for each
+  phase-region group in the ZPF data. Auto-DDM uses this vector as its
+  objectives. ``DataGenerator.generate_sample`` draws Latin-hypercube samples
+  around the initial parameters and writes ``samples.csv`` for surrogate
+  training. ``get_grouped_error`` methods were added to ``ZPFResidual`` and
+  ``FixedConfigurationPropertyResidual`` to support this.
+- **Residual set.** Only the non-equilibrium thermochemical and ZPF residuals
+  are registered. ``ActivityResidual`` and ``EquilibriumPropertyResidual`` are
+  disabled.
+- **Thermochemical error.** For ``SM_MIX`` data, the ideal mixing entropy is
+  subtracted before the difference is taken.
+- **Input file.** The ``mcmc`` section requires a new integer key
+  ``LHS_points`` (reserved for surrogate data generation). ``cores`` is set to
+  ``22 * chains_per_parameter / 2`` and is not read from the input file.
+  ``run_espei`` returns ``None`` instead of the database and sampler.
+- **Fixed problem size.** The surrogate, chain setup and error grouping assume
+  22 fitting parameters and 22 datasets, with the first 10 outputs being
+  thermochemical and the remaining 12 being ZPF. Changing the system requires
+  retraining the surrogate and adjusting these constants.
+- **Smaller changes.** ``_extract_pot_conds`` accepts one-element arrays;
+  ``refdata`` uses ``importlib.metadata`` instead of ``pkg_resources``;
+  ``espei.plot.plot_all_interaction`` plots interaction data at arbitrary
+  temperature; ``torch``, ``joblib`` and ``pandas`` are added as dependencies;
+  the dask scheduler logs are quieter.
 
-ESPEI can optimize and quantify the uncertainty of CALPHAD model parameters to thermochemical and phase boundary data.
-Optimization and uncertainty quantification is performed using a Bayesian ensemble Markov Chain Monte Carlo (MCMC) method.
-Any CALPHAD database can be used, including databases generated by ESPEI or starting from an existing CALPHAD database.
+Everything else (parameter generation, datasets, phase models, priors, plotting)
+is unchanged from ESPEI 0.9.0.
 
-ESPEI supports all models supported by pycalphad.
-User-developed models that are compatible with pycalphad can be used without making any modifications to ESPEI's code.
-Performing Bayesian parameter estimation for arbitrary multicomponent thermodynamic data is supported.
+
+Role in the Auto-DDM loop
+=========================
+
+For each candidate weight vector Auto-DDM:
+
+1. writes the weights to ``$AUTODDM_SURROGATE_DIR/weights.json``;
+2. writes an ESPEI input file and runs ``espei --input run_mcmc.yaml``, which
+   produces a calibrated TDB plus trace and log-probability files;
+3. loads the TDB with ``DataGenerator`` and calls ``eval_samples_sep`` to get
+   the 22 reconstruction errors that drive the next generation.
+
 
 Installing
-----------
+==========
 
-pip (recommended)
-~~~~~~~~~~~~~~~~~
-
-To install ESPEI from PyPI using pip:
+Python 3.12 is recommended. Install into a virtual environment:
 
 .. code-block:: bash
 
+   python -m venv auto-ddm-env
+   source auto-ddm-env/bin/activate
    pip install -U pip
-   pip install -U espei
+   pip install git+https://github.com/guannant/llm_espei.git
 
-A recommended best practice is to install Python packages into a virtual environment.
-To create an environment and install ESPEI on Linux and macOS/OSX:
+Auto-DDM's ``requirements.txt`` pins the exact commit it was tested with.
+
+
+Running
+=======
+
+Set the surrogate folder, then run ESPEI as usual.
+The folder must contain ``final_model_full_data.pt``, ``scalerX.pkl``,
+``scalerY.pkl`` and ``weights.json``. A trained Cu–Mg surrogate ships with
+Auto-DDM in ``examples/CALPHAD/Pytorch_MLP_CV/``.
 
 .. code-block:: bash
 
-   python -m venv calphad-env
-   source calphad-env/bin/activate
-   pip install -U pip
-   pip install -U pycalphad
+   export AUTODDM_SURROGATE_DIR=/path/to/Auto_DataDrivenModeling/examples/CALPHAD/Pytorch_MLP_CV
+   espei --input run_mcmc.yaml
 
-On Windows:
+A minimal ``run_mcmc.yaml``:
 
-.. code-block:: batch
+.. code-block:: yaml
 
-   python -m venv calphad-env
-   calphad-env\Scripts\activate
-   pip install -U pip
-   pip install -U pycalphad
+   system:
+     phase_models: phase_models.json
+     datasets: input-data
+   mcmc:
+     input_db: Cu-Mg-generated.tdb
+     iterations: 800
+     LHS_points: 4500
+     chains_per_parameter: 4
+     chain_std_deviation: 0.1
+     prior:
+       name: normal
+       loc_relative: 1.0
+       scale_relative: 1.0
+     scheduler: null
+   output:
+     output_db: calibrated.tdb
+     tracefile: trace.npy
+     probfile: lnprob.npy
+     logfile: espei_log.txt
+     verbosity: 2
 
-Anaconda
-~~~~~~~~
+``weights.json`` maps dataset names to weights. Thermochemical datasets are
+keyed ``<PHASE>_<PROPERTY>`` and ZPF datasets by their phase tuple:
 
-If you prefer using Anaconda, ESPEI is distributed on conda-forge.
-If you do not have Anaconda installed, we recommend you download and install `Miniconda3 <https://docs.conda.io/en/latest/miniconda.html>`_.
-ESPEI can be installed with the conda package manager by:
+.. code-block:: json
 
-.. code-block:: bash
+   {
+     "LIQUID_HM_MIX": 500,
+     "LIQUID_SM_MIX": 0.2,
+     "(LIQUID,FCC_A1)": 1000
+   }
 
-    conda install -c conda-forge espei
+To compute the per-dataset errors of a calibrated database from Python:
+
+.. code-block:: python
+
+   import json
+   from pycalphad import Database
+   from espei.datasets import load_datasets, recursive_glob
+   from espei.optimizers.opt_generate_samples import DataGenerator
+
+   with open("phase_models.json") as f:
+       phase_models = json.load(f)
+   dbf = Database("calibrated.tdb")
+   datasets = load_datasets(sorted(recursive_glob("input-data", "*.json")))
+   gen = DataGenerator(dbf, datasets, phase_models)
+   errors, names = gen.eval_samples_sep(gen.initial_guess)
 
 
-History
--------
+Citing
+======
 
-The name ESPEI and early concept were developed by [Shang2010]_ under the supervision of Zi-Kui Liu.
-After developing `pycalphad`_, Richard Otis and Zi-Kui Liu reimagined the concept and wrote
-`pycalphad-fitting`_ (used in [Otis2016]_ and [Otis2017]_), which formed the nucleus for the present version of ESPEI ([Bocklund2019]_).
+If you use this fork, please cite the Auto-DDM paper above and ESPEI:
 
-Details on the implementation of ESPEI can be found in the following publications:
-
-- B\. Bocklund *et al.*, MRS Communications 9(2) (2019) 1–10. doi:`10.1557/mrc.2019.59 <https://doi.org/10.1557/mrc.2019.59>`_.
-- B\. Bocklund, Ph.D. Dissertation (Chapter 3), The Pennsylvania State University (2021), https://etda.libraries.psu.edu/catalog/21192bjb54
-
-
-
-Getting Help
-------------
-
-For help on installing and using ESPEI, please join the `PhasesResearchLab/ESPEI Gitter room <https://gitter.im/PhasesResearchLab/ESPEI>`_.
-
-Bugs and software issues should be reported on the `GitHub issue tracker <https://github.com/PhasesResearchLab/ESPEI/issues>`_.
+B. Bocklund, R. Otis, A. Egorov, A. Obaied, I. Roslyakova, Z.-K. Liu,
+ESPEI for efficient thermodynamic database development, modification, and
+uncertainty quantification: application to Cu–Mg, MRS Commun. 9 (2019) 618–627.
+doi:`10.1557/mrc.2019.59 <https://doi.org/10.1557/mrc.2019.59>`_
 
 
 License
--------
+=======
 
-ESPEI is MIT licensed.
-
-::
-
-   The MIT License (MIT)
-
-   Copyright (c) 2015-2018 Richard Otis
-   Copyright (c) 2017-2018 Brandon Bocklund
-   Copyright (c) 2018-2019 Materials Genome Foundation
-
-   Permission is hereby granted, free of charge, to any person obtaining a copy
-   of this software and associated documentation files (the "Software"), to deal
-   in the Software without restriction, including without limitation the rights
-   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-   copies of the Software, and to permit persons to whom the Software is
-   furnished to do so, subject to the following conditions:
-
-   The above copyright notice and this permission notice shall be included in all
-   copies or substantial portions of the Software.
-
-   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-   SOFTWARE.
-
-
-Citing ESPEI
-------------
-
-If you use ESPEI for work presented in a publication, we ask that you cite the following publication:
-
-B. Bocklund, R. Otis, A. Egorov, A. Obaied, I. Roslyakova, Z.-K. Liu, ESPEI for efficient thermodynamic database development, modification, and uncertainty quantification: application to Cu–Mg, MRS Commun. (2019) 1–10. doi:`10.1557/mrc.2019.59 <https://doi.org/10.1557/mrc.2019.59>`_.
-
-::
-
-   @article{Bocklund2019ESPEI,
-            archivePrefix = {arXiv},
-            arxivId = {1902.01269},
-            author = {Bocklund, Brandon and Otis, Richard and Egorov, Aleksei and Obaied, Abdulmonem and Roslyakova, Irina and Liu, Zi-Kui},
-            doi = {10.1557/mrc.2019.59},
-            eprint = {1902.01269},
-            issn = {2159-6859},
-            journal = {MRS Communications},
-            month = {jun},
-            pages = {1--10},
-            title = {{ESPEI for efficient thermodynamic database development, modification, and uncertainty quantification: application to Cu–Mg}},
-            year = {2019}
-   }
-
-
-.. _pycalphad-fitting: https://github.com/richardotis/pycalphad-fitting
-.. _pycalphad: http://pycalphad.org
-
-.. [Bocklund2019] Bocklund *et al.*, MRS Communications 9(2) (2019) 1–10. doi:`10.1557/mrc.2019.59 <https://doi.org/10.1557/mrc.2019.59>`_
-.. [Otis2016] Otis, Ph.D. Dissertation, The Pennsylvania State University (2016). https://etda.libraries.psu.edu/catalog/s1784k73d
-.. [Otis2017] Otis *et al.*, JOM 69 (2017) doi:`10.1007/s11837-017-2318-6 <http://doi.org/10.1007/s11837-017-2318-6>`_
-.. [Shang2010] Shang, Wang, and Liu, Magnes. Technol. 2010 617-622 (2010).
+MIT, inherited from ESPEI. See ``LICENSE``.
+ESPEI is Copyright (c) 2015–2019 Richard Otis, Brandon Bocklund and the
+Materials Genome Foundation.

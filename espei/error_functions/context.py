@@ -72,7 +72,6 @@ def setup_context(dbf, datasets, symbols_to_fit=None, data_weights=None, phase_m
     error_context = {
         "symbols_to_fit": symbols_to_fit,
         "residual_objs": residual_objs,
-        "active_id": None,
         "initial_set": None
     }
     return error_context

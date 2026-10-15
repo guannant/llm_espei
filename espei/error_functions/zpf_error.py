@@ -72,7 +72,8 @@ def _extract_pot_conds(all_conditions: Dict[v.StateVariable, np.ndarray], idx: i
         # Otherwise treat it as a scalar
         if len(cond_val) > 1:
             cond_val = cond_val[idx]
-        pot_conds[getattr(v, cond_key)] = float(cond_val)
+        # Ensure we have a Python scalar (float() fails on 1-element arrays)
+        pot_conds[getattr(v, cond_key)] = float(np.asarray(cond_val).flat[0])
     return pot_conds
 
 
@@ -367,8 +368,72 @@ def calculate_zpf_driving_forces(zpf_data: Sequence[Dict[str, Any]],
                 _log.debug('Equilibria: (%s), current phase: %s, hyperplane: %s, driving force: %s, reference: %s', eq_str, vertex.phase_name, target_hyperplane, driving_force, dataset_ref)
         driving_forces.append(data_driving_forces)
         weights.append(data_weights)
+    # driving_forces = np.array(driving_forces)    
+    # weights = np.array(weights)
     return driving_forces, weights
 
+def calculate_seperate_zpf(zpf_data: Sequence[Dict[str, Any]],
+                                 parameters: ArrayLike = None,
+                                 approximate_equilibrium: bool = False,
+                                 short_circuit: bool = False
+                                 ) -> Tuple[List[List[float]], List[List[float]]]:
+    if parameters is None:
+        parameters = np.array([])
+    driving_forces = []
+    weights = []
+    for data in zpf_data:
+        data_driving_forces = {}
+        data_weights = []
+        weight = data['weight']
+        # for the set of phases and corresponding tie-line verticies in equilibrium
+        for phase_region in data['phase_regions']:
+            # 1. Calculate the average multiphase hyperplane
+            eq_str = phase_region.eq_str()
+            target_hyperplane = estimate_hyperplane(phase_region, data['dbf'], parameters, approximate_equilibrium=approximate_equilibrium)
+            if np.any(np.isnan(target_hyperplane)):
+                data_driving_forces.setdefault(eq_str,[]).append(0)
+                data_weights.extend([weight]*len(phase_region.vertices))
+                continue
+            phase_name  = ""
+            temp_drive = []
+            # 2. Calculate the driving force to that hyperplane for each vertex
+            for vertex in phase_region.vertices:
+                #print(vertex.phase_name)
+                
+                driving_force = driving_force_to_hyperplane(target_hyperplane, phase_region, data['dbf'], data['parameter_dict'], vertex, parameters,
+                                                            approximate_equilibrium=approximate_equilibrium,
+                                                            )
+                phase_name = phase_name + "_" + vertex.phase_name
+                temp_drive.append(driving_force)
+                data_weights.append(weight)
+            eq_str = eq_str+'_' + phase_name
+            data_driving_forces.setdefault(eq_str,[]).append(np.average(temp_drive))
+        driving_forces.append(data_driving_forces)
+        weights.append(data_weights)
+    return driving_forces, weights
+
+def calculate_grouped_zpf_error(zpf_data: Sequence[Dict[str, Any]],
+                        parameters: np.ndarray = None,
+                        data_weight: int = 1.0,
+                        approximate_equilibrium: bool = False) -> float:
+    """
+    Calculate the likelihood due to phase equilibria data.
+
+    For detailed documentation, see ``calculate_zpf_driving_forces``
+
+    Returns
+    -------
+    float
+        Log probability of ZPF driving forces
+
+    """
+    if len(zpf_data) == 0:
+        return 0.0
+    
+    driving_forces, weights = calculate_seperate_zpf(zpf_data, parameters, approximate_equilibrium, short_circuit=True)
+    # Driving forces and weights are 2D ragged arrays with the shape (len(zpf_data), len(zpf_data['values']))
+
+    return driving_forces
 
 def calculate_zpf_error(zpf_data: Sequence[Dict[str, Any]],
                         parameters: np.ndarray = None,
@@ -391,10 +456,12 @@ def calculate_zpf_error(zpf_data: Sequence[Dict[str, Any]],
     # Driving forces and weights are 2D ragged arrays with the shape (len(zpf_data), len(zpf_data['values']))
     driving_forces = np.concatenate(driving_forces).T
     weights = np.concatenate(weights)
+    # print('driving_forces', driving_forces.shape)
+    # print('weights', weights.shape)
     if np.any(np.logical_or(np.isinf(driving_forces), np.isnan(driving_forces))):
         return -np.inf
     log_probabilites = norm.logpdf(driving_forces, loc=0, scale=1000/data_weight/weights)
-    _log.debug('Data weight: %s, driving forces: %s, weights: %s, probabilities: %s', data_weight, driving_forces, weights, log_probabilites)
+    #_log.debug('Data weight: %s, driving forces: %s, weights: %s, probabilities: %s', data_weight, driving_forces, weights, log_probabilites)
     return np.sum(log_probabilites)
 
 
@@ -434,6 +501,10 @@ class ZPFResidual(ResidualFunction):
 
     def get_likelihood(self, parameters) -> float:
         likelihood = calculate_zpf_error(self.zpf_data, parameters, data_weight=self.weight)
+        return likelihood
+    
+    def get_grouped_error(self, parameters) -> float:
+        likelihood = calculate_grouped_zpf_error(self.zpf_data, parameters, data_weight=self.weight)
         return likelihood
 
 

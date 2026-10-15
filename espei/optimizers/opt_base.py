@@ -26,9 +26,9 @@ class OptimizerBase(object):
         raise NotImplementedError("The `_fit` method not implemented. Create a subclass of OptimizerBase with `_fit` overridden to use it")
 
     def fit(self, symbols, datasets, *args, **kwargs):
-        parameters,sample_counts = self._fit(symbols, datasets, *args, **kwargs)
+        parameters = self._fit(symbols, datasets, *args, **kwargs)
         self.dbf.symbols.update(parameters)
-        return self.dbf, sample_counts
+        return self.dbf
 
     @staticmethod
     def predict(params, context):

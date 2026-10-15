@@ -157,8 +157,6 @@ def calculate_activity_error(dbf, comps, phases, datasets, parameters=None, phas
     -------
     float
         A single float of the likelihood
-
-
     """
     residuals, weights = calculate_activity_residuals(dbf, comps, phases, datasets, parameters=parameters, phase_models=phase_models, callables=callables, data_weight=data_weight)
     likelihood = np.sum(norm(0, scale=weights).logpdf(residuals))
@@ -224,4 +222,4 @@ class ActivityResidual(ResidualFunction):
         return likelihood
 
 
-residual_function_registry.register(ActivityResidual)
+#residual_function_registry.register(ActivityResidual)
